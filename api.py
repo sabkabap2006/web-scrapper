@@ -338,27 +338,131 @@ def get_custom_scrape(
     return scrape_custom(CustomScrapeRequest(urls=url_list, prompt=prompt, use_browser=use_browser))
 
 
-# ─────────────────────────────────────────────
-# DEDICATED NEWS ENDPOINT — scrapes WION + India Today by default
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# DEDICATED NEWS ENDPOINT — with AI-output retry
+# If the AI says "No relevant crisis data found", automatically retries with
+# a progressively relaxed prompt until real news data is extracted.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Sentinel phrase the AI returns when no crisis content is matched
+NO_DATA_SENTINEL = "no relevant crisis data found"
+
+# Prompt ladder: each tier is more relaxed than the last
+NEWS_PROMPT_LADDER = [
+    # Tier 1 — strict crisis-keyword filter (default)
+    (
+        f"Analyze the provided web content.\n"
+        f"CRITICAL RULE: You must ONLY extract information IF the content explicitly involves one or more "
+        f"of these specific Crisis Keywords:\n{', '.join(CRISIS_KEYWORDS[:80])}...\n\n"
+        f"If the page relates to any of these keywords, extract the core details of the event or crisis, "
+        f"summarizing the who, what, when, where, and why.\n"
+        f"If none of these crisis keywords apply, reply exactly with: "
+        f"'No relevant crisis data found on this page based on the key attributes.'"
+    ),
+    # Tier 2 — broad: extract ALL significant news (conflict, politics, economy, disasters)
+    (
+        "Extract ALL significant news stories from the provided web content. "
+        "Focus on: conflicts, wars, political crises, economic disruptions, natural disasters, "
+        "geopolitical tensions, humanitarian events, terrorism, sanctions, or any major world event. "
+        "DO NOT say 'no crisis found'. Even if the page is calm, summarize the top headlines with "
+        "who, what, when, where. Return as a structured list."
+    ),
+    # Tier 3 — fully open: just extract every headline and summary you can find
+    (
+        "Extract every news headline and its summary from the provided web content. "
+        "Return as many items as possible in this JSON format:\n"
+        "[{\"headline\": \"...\", \"summary\": \"...\", \"source\": \"...\"}]\n"
+        "Do not filter anything out — include all stories you can find."
+    ),
+]
+
 @app.get("/api/scrape/news", summary="News Scraper — WION & India Today [GET]")
 def get_news(
     urls: str = Query(
         default="https://www.wionews.com/, https://www.indiatoday.in/",
         description="Comma-separated news URLs (defaults to WION News + India Today)"
     ),
-    prompt: str = Query(
-        default="",
-        description="Extraction prompt. Leave blank for default crisis-keyword analysis."
-    ),
-    use_browser: bool = Query(default=False, description="Use Selenium headless browser")
+    use_browser: bool = Query(default=False, description="Use Selenium headless browser"),
+    max_prompt_retries: int = Query(default=3, description="Max prompt-level retries if no crisis data found (1-3)")
 ):
     """
-    Dedicated news scraper. Defaults to WION News + India Today.
-    
+    Dedicated news scraper with automatic AI-output retry.
+
+    If the AI returns 'No relevant crisis data found', it automatically retries
+    with a progressively relaxed prompt — up to max_prompt_retries times.
+
     Open directly in browser:
-    http://localhost:8000/api/scrape/news
-    http://localhost:8000/api/scrape/news?urls=https://ndtv.com,https://thehindu.com
+        http://localhost:8000/api/scrape/news
+        http://localhost:8000/api/scrape/news?urls=https://ndtv.com,https://thehindu.com
     """
     url_list = [u.strip() for u in urls.split(",") if u.strip()]
-    return scrape_custom(CustomScrapeRequest(urls=url_list, prompt=prompt, use_browser=use_browser))
+    max_tiers = min(max_prompt_retries, len(NEWS_PROMPT_LADDER))
+
+    # ── Step 1: Scrape all URLs once (no need to re-scrape on prompt retry) ──
+    errors = []
+    scraped_text = ""
+
+    for idx, raw_url in enumerate(url_list):
+        target_url = raw_url.strip()
+        if not target_url.startswith("http://") and not target_url.startswith("https://"):
+            target_url = "https://" + target_url
+
+        def error_cb(err, _url=target_url):
+            errors.append(f"{_url}: {err}")
+
+        text = scrape_website(target_url, use_browser=use_browser, error_callback=error_cb)
+        if text:
+            scraped_text += f"\n\n--- Source {idx+1}: {target_url} ---\n{text[:12000]}"
+
+    if not scraped_text:
+        raise HTTPException(
+            status_code=500 if errors else 404,
+            detail=" | ".join(errors) if errors else "No text could be extracted from any of the target URLs."
+        )
+
+    # ── Step 2: Try each prompt tier until real data is returned ──────────────
+    attempt_log = []
+    for tier, prompt in enumerate(NEWS_PROMPT_LADDER[:max_tiers], start=1):
+        logger.info(f"[News] Prompt tier {tier}/{max_tiers} attempt...")
+        attempt_log.append(f"Tier {tier}: {'crisis-strict' if tier == 1 else 'broad-news' if tier == 2 else 'all-headlines'}")
+
+        try:
+            ai_response = invoke_ai_agent(scraped_text, prompt)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"AI API error on tier {tier}: {str(e)}")
+
+        # Check if AI returned the no-data sentinel
+        if NO_DATA_SENTINEL in ai_response.lower():
+            logger.warning(f"[News] Tier {tier} returned sentinel. Escalating to next prompt tier...")
+            if tier < max_tiers:
+                continue   # try the next, more relaxed prompt
+            else:
+                # All tiers exhausted — return the last tier's response anyway
+                logger.warning("[News] All prompt tiers exhausted. Returning last attempt.")
+                return {
+                    "sources_scraped": len(url_list),
+                    "retry_attempts": tier,
+                    "prompt_tier_used": tier,
+                    "note": "All prompt tiers tried. No strong crisis data found — returning broadest extraction.",
+                    "result": ai_response
+                }
+
+        # Real data found — return it
+        logger.info(f"[News] ✅ Got real data on tier {tier}.")
+
+        # Try to parse as JSON (tier 3 prompt asks for JSON)
+        result_data: Any = ai_response
+        if tier == 3:
+            try:
+                clean = ai_response.strip().lstrip("```json").lstrip("```").rstrip("```")
+                result_data = json.loads(clean.strip())
+            except json.JSONDecodeError:
+                result_data = ai_response  # fallback to raw text
+
+        return {
+            "sources_scraped": len(url_list),
+            "retry_attempts": tier,
+            "prompt_tier_used": tier,
+            "result": result_data
+        }
+
