@@ -2,66 +2,120 @@ import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 import json
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# Retry configuration
+# ─────────────────────────────────────────────
+MAX_RETRIES = 3          # maximum fetch attempts per URL
+RETRY_BASE_DELAY = 2     # seconds — doubles each retry (2 → 4 → 8)
+MIN_CONTENT_LENGTH = 150 # anything shorter is treated as a failed fetch
+
+# Rotate user agents to reduce bot-detection blocks on retry
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+]
 
 CRISIS_KEYWORDS = [
     "abduction", "accord", "accountability", "active annexation", "active artillery", "active assault", "active battle", "active blockade", "active bombardment", "active catastrophe", "active clash", "active conflict", "active coup", "active crisis", "active geopolitics", "active guerrilla", "active hostilities", "active incursion", "active insurgency", "active invasion", "active junta", "active military", "active militia", "active mutiny", "active occupation", "active offensive", "active oppressive", "active overthrow", "active paramilitary", "active rebellion", "active regime", "active resistance", "active secession", "active separatism", "active siege", "active skirmish", "active uprising", "active war", "acute annexation", "acute artillery", "acute assault", "acute battle", "acute blockade", "acute bombardment", "acute catastrophe", "acute clash", "acute conflict", "acute coup", "acute crisis", "acute geopolitics", "acute guerrilla", "acute hostilities", "acute incursion", "acute insurgency", "acute invasion", "acute junta", "acute military", "acute militia", "acute mutiny", "acute occupation", "acute offensive", "acute oppressive", "acute overthrow", "acute paramilitary", "acute rebellion", "acute regime", "acute resistance", "acute secession", "acute separatism", "acute siege", "acute skirmish", "acute uprising", "acute war", "adaptation", "adverse events", "aerial bombardment", "aerial strike", "afghanistan-pakistan border", "aftershock", "agency intervention", "aid", "air strike", "alliance", "amnesty", "anarchy", "annexation", "armistice", "arms race", "arms-race", "arson", "artillery", "asymmetric", "asymmetric warfare", "asylum", "assets", "asteroid", "atrocity", "authoritarianism", "autocracy", "autonomy", "avalanche", "ballistic", "bankruptcy", "battle", "biological", "biological hazard", "blackmail", "blizzard", "blockade", "blue-helmet", "bombardment", "border", "border dispute", "boycott", "brainwashing", "breach", "bribery", "buffer-zone", "bushfire", "capital", "capital flight", "cartel", "casualties", "catastrophe", "catastrophic catastrophe", "catastrophic crisis", "catastrophic disaster", "catastrophic event", "catastrophic hazard", "catastrophic threat", "ceasefire", "censorship", "central clash", "central conflict", "central crisis", "chaos", "chemical", "chemical leak", "chronic annexation", "chronic artillery", "chronic assault", "chronic battle", "chronic blockade", "chronic bombardment", "chronic catastrophe", "chronic clash", "chronic conflict", "chronic coup", "chronic crisis", "chronic geopolitics", "chronic guerrilla", "chronic hostilities", "chronic incursion", "chronic insurgency", "chronic invasion", "chronic junta", "chronic military", "chronic militia", "chronic mutiny", "chronic occupation", "chronic offensive", "chronic oppressive", "chronic overthrow", "chronic paramilitary", "chronic rebellion", "chronic regime", "chronic resistance", "chronic secession", "chronic separatism", "chronic siege", "chronic skirmish", "chronic uprising", "chronic war", "civil-war", "civil unrest", "clash", "class", "cleansing", "client-state", "climate", "climatological", "cloudburst", "coastal erosion", "coalition", "coercion", "collapse", "collective assault", "collective battle", "collective clash", "collective conflict", "collective crisis", "colonialism", "combat", "communication blackout", "compliance", "conscription", "contingency", "contraband", "cooperation", "corruption", "coup", "coup d'état", "counter-insurgency", "covert invasion", "covert strike", "creed", "crime", "criminal", "critical infrastructure attack", "critical minerals", "culture", "currency devaluation", "cyber warfare", "cyberwar", "cyclone", "dam failure", "deadlock", "deadline", "debt", "debt default", "defection", "defense", "defiance", "deforestation", "demagoguery", "demilitarized", "demobilization", "democracy", "demonstration", "deployment", "deprivation", "deradicalization", "desertification", "desertion", "deterrence", "detente", "devastating catastrophe", "devastating crisis", "devastating disaster", "devastating emergency", "devastating hazard", "devastating threat", "development", "diamonds", "dictatorship", "digital", "diplomatic", "diplomatic crisis", "diplomatic expulsion", "disadvantage", "disarmament", "disaster", "disaster mitigation", "disaster recovery", "disaster relief", "disinformation", "displacement", "dispute", "division", "doctrine", "dogma", "dominance", "drone strike", "drone technology", "drought", "early warning system", "early-warning", "earthquake", "ecological collapse", "economic collapse", "economic crisis", "economy", "education", "election interference", "elite", "embargo", "emergency", "emergency response", "empire", "employment", "empowerment", "endurance", "energy", "energy blackout", "energy crisis", "enforcement", "environment", "environmental impact", "epicenter", "epidemic", "equality", "equity", "eruption", "escalation", "espionage", "ethnic", "ethnic cleansing", "ethnicity", "evacuation", "evacuation order", "exclusion", "executive coup", "expansionism", "extinction event", "extortion", "extreme heat", "extreme weather", "extremism", "faction", "failed state", "fairness", "famine", "fanaticism", "fatalities", "fema", "feud", "finance", "first responders", "flash flood", "flashpoint", "flood", "food insecurity", "food shortage", "forced disappearance", "forced displacement", "foreign intervention", "forest fire", "forgiveness", "fragile state", "fragility", "fragmentation", "freedom", "frontier", "fundamentalism", "future", "gang", "gas", "gender", "genocide", "geomagnetic storm", "geophysical", "geopolitics", "glacial lake outburst", "global annexation", "global artillery", "global assault", "global battle", "global blockade", "global bombardment", "global catastrophe", "global clash", "global conflict", "global cooling", "global coup", "global crisis", "global disaster", "global emergency", "global geopolitics", "global guerrilla", "global hazard", "global hostilities", "global incursion", "global insurgency", "global invasion", "global junta", "global military", "global militia", "global mutiny", "global occupation", "global offensive", "global oppressive", "global overthrow", "global paramilitary", "global rebellion", "global regime", "global resistance", "global secession", "global separatism", "global siege", "global skirmish", "global threat", "global uprising", "global war", "global warming", "globalization", "gold", "governance", "grid failure", "growth", "guerrilla", "hacking", "happiness", "harassment", "harmony", "hate-speech", "hazardous waste", "health", "heatwave", "hegemony", "hierarchy", "historical catastrophe", "historical crisis", "historical disaster", "historical emergency", "historical hazard", "historical threat", "history", "honesty", "hope", "hostage", "hostilities", "hotspot", "human rights", "human rights violations", "humanitarian", "humanitarian aid", "humanitarian crisis", "hunger", "hurricane", "hybrid-war", "hydrological", "hyperinflation", "ice storm", "identity", "ideology", "idp", "illegal annexation", "illegal assault", "illegal bombardment", "illegal conflict", "illegal crisis", "illegitimate regime", "illicit trade", "imminent catastrophe", "imminent crisis", "imminent disaster", "imminent emergency", "imminent hazard", "imminent threat", "imperialism", "impasse", "incitement", "inclusion", "incursion", "independence", "indigenous", "indoctrination", "industrial accident", "inequality", "inflation", "influence", "informal clash", "informal conflict", "informal crisis", "infringement", "infrastructure breakdown", "infrastructure damage", "infrastructure failure", "innovation", "inquiry", "inspection", "instability", "insurgency", "integrity", "intelligence", "inter-state conflict", "interceptor", "internally displaced", "internally displaced persons", "international annexation", "international artillery", "international assault", "international battle", "international blockade", "international bombardment", "international catastrophe", "international clash", "international conflict", "international coup", "international crisis", "international disaster", "international geopolitics", "international guerrilla", "international hostilities", "international incursion", "international insurgency", "international invasion", "international junta", "international military", "international militia", "international mutiny", "international occupation", "international offensive", "international oppressive", "international overthrow", "international paramilitary", "international rebellion", "international regime", "international resistance", "international secession", "international separatism", "international siege", "international skirmish", "international uprising", "international war", "internet blackout", "intervention", "intimidation", "intra-state conflict", "invasive species", "invasion", "investment", "isolation", "jihad", "junta", "justice", "kidnapping", "kleptocracy", "labor", "land", "landslide", "language", "lava", "law", "lawlessness", "leadership", "legacy", "legal annexation", "legal assault", "legal bombardment", "legal conflict", "legal crisis", "legitimacy", "liberation", "liberty", "limnic eruption", "local annexation", "local artillery", "local assault", "local battle", "local blockade", "local bombardment", "local catastrophe", "local clash", "local conflict", "local coup", "local crisis", "local disaster", "local emergency", "local geopolitics", "local guerrilla", "local hazard", "local hostilities", "local incursion", "local insurgency", "local invasion", "local junta", "local military", "local militia", "local mutiny", "local occupation", "local offensive", "local oppressive", "local overthrow", "local paramilitary", "local rebellion", "local regime", "local resistance", "local secession", "local separatism", "local siege", "local skirmish", "local threat", "local uprising", "local war", "localization", "locust swarm", "logistics", "looting", "mafia", "magma", "magnitude", "majorities", "malnutrition", "manifesto", "marginalization", "martial law", "mass casualty", "mass migration", "massive catastrophe", "massive crisis", "massive disaster", "massive emergency", "massive hazard", "massive threat", "massacre", "mediation", "medical shortage", "memory", "mercenary", "meteor impact", "meteorological", "migration", "militant", "military", "militia", "minerals", "minorities", "misinformation", "missing persons", "missile", "mitigation", "mobilization", "monarchy", "monitoring", "monsoon", "mudslide", "multilateralism", "mutiny", "national annexation", "national artillery", "national assault", "national battle", "national blockade", "national bombardment", "national catastrophe", "national clash", "national conflict", "national coup", "national crisis", "national disaster", "national geopolitics", "national guerrilla", "national hostilities", "national incursion", "national insurgency", "national invasion", "national junta", "national military", "national militia", "national mutiny", "national occupation", "national offensive", "national oppressive", "national overthrow", "national paramilitary", "national rebellion", "national regime", "national resistance", "national secession", "national separatism", "national siege", "national skirmish", "national uprising", "national war", "nationalism", "natural hazard", "negotiation", "neocolonialism", "nepotism", "nuclear", "nuclear meltdown", "nuclear proliferation", "occupation", "ocean acidification", "offense", "offensive", "official annexation", "official assault", "official bombardment", "official conflict", "official crisis", "oil", "oil embargo", "oil shock", "oil spill", "oligarchy", "operational annexation", "operational assault", "operational bombardment", "operational conflict", "operational crisis", "oppression", "order", "organized-crime", "outbreak", "overthrow", "pact", "pandemic", "paramilitary", "participation", "partition", "patriotism", "peace", "peace talks", "peacebuilding", "peacekeeping", "people", "permafrost thaw", "persecution", "pillage", "plague", "plunder", "plutocracy", "pogrom", "polarization", "political instability", "populism", "post-disaster", "potential catastrophe", "potential crisis", "potential disaster", "potential emergency", "potential hazard", "potential threat", "poverty", "power", "preemptive strike", "preparedness", "prevention", "price", "private annexation", "private assault", "private bombardment", "private conflict", "private crisis", "private-military", "prognosis", "proliferate", "proliferation", "propaganda", "prosperity", "protest", "proxy", "proxy-war", "psyop", "public annexation", "public assault", "public bombardment", "public conflict", "public crisis", "puppet-state", "pyroclastic", "race", "racial", "radicalization", "raid", "ransom", "rebellion", "recession", "reconciliation", "reconstruction", "reconnaissance", "red cross", "refugee", "refugee camp", "regime", "regime change", "regional annexation", "regional artillery", "regional assault", "regional battle", "regional blockade", "regional bombardment", "regional catastrophe", "regional clash", "regional conflict", "regional coup", "regional crisis", "regional disaster", "regional emergency", "regional geopolitics", "regional guerrilla", "regional hazard", "regional hostilities", "regional incursion", "regional insurgency", "regional invasion", "regional junta", "regional military", "regional militia", "regional mutiny", "regional occupation", "regional offensive", "regional oppressive", "regional overthrow", "regional paramilitary", "regional rebellion", "regional regime", "regional resistance", "regional secession", "regional separatism", "regional siege", "regional skirmish", "regional threat", "regional uprising", "regional war", "rehabilitation", "reintegration", "relief", "religion", "reparations", "repression", "republic", "resilience", "resource depletion", "resource scarcity", "resource war", "resistance", "retaliation", "revolution", "rights", "riot", "rogue state", "rule-of-law", "sabotage", "safety", "sanction", "satellite", "scarcity", "search and rescue", "sea level rise", "secession", "sectarian", "security", "security-sector-reform", "sedition", "seismic", "self-determination", "separatism", "settlement", "severe catastrophe", "severe crisis", "severe disaster", "severe emergency", "severe hazard", "severe threat", "shelling", "shelter", "shortage", "siege", "sinkhole", "skirmish", "slaughter", "smuggling", "snowstorm", "social unrest", "soil degradation", "solar flare", "solidarity", "sovereignty", "stability", "stalemate", "standoff", "starvation", "state failure", "state repression", "state of emergency", "state-of-emergency", "stealth", "storm surge", "strategic annexation", "strategic artillery", "strategic assault", "strategic battle", "strategic blockade", "strategic bombardment", "strategic catastrophe", "strategic clash", "strategic conflict", "strategic coup", "strategic crisis", "strategic disaster", "strategic geopolitics", "strategic guerrilla", "strategic hostilities", "strategic incursion", "strategic insurgency", "strategic invasion", "strategic junta", "strategic military", "strategic militia", "strategic mutiny", "strategic occupation", "strategic offensive", "strategic oppressive", "strategic overthrow", "strategic paramilitary", "strategic rebellion", "strategic regime", "strategic resistance", "strategic secession", "strategic separatism", "strategic siege", "strategic skirmish", "strategic uprising", "strategic war", "strategy", "strike", "structural collapse", "subversion", "supercell", "supply-chain", "surplus", "surveillance", "survivors", "sustainability", "tactical annexation", "tactical artillery", "tactical assault", "tactical battle", "tactical blockade", "tactical bombardment", "tactical catastrophe", "tactical clash", "tactical conflict", "tactical coup", "tactical crisis", "tactical disaster", "tactical geopolitics", "tactical guerrilla", "tactical hostilities", "tactical incursion", "tactical insurgency", "tactical invasion", "tactical junta", "tactical military", "tactical militia", "tactical mutiny", "tactical occupation", "tactical offensive", "tactical oppressive", "tactical overthrow", "tactical paramilitary", "tactical rebellion", "tactical regime", "tactical resistance", "tactical secession", "tactical separatism", "tactical siege", "tactical skirmish", "tactical uprising", "tactical war", "tactics", "tension", "territory", "terrorism", "threat", "tornado", "torture", "trade war", "trafficking", "transgression", "transitional-justice", "transnational annexation", "transnational artillery", "transnational assault", "transnational battle", "transnational blockade", "transnational bombardment", "transnational catastrophe", "transnational clash", "transnational conflict", "transnational coup", "transnational crisis", "transnational disaster", "transnational geopolitics", "transnational guerrilla", "transnational hostilities", "transnational incursion", "transnational insurgency", "transnational invasion", "transnational junta", "transnational military", "transnational militia", "transnational mutiny", "transnational occupation", "transnational offensive", "transnational oppressive", "transnational overthrow", "transnational paramilitary", "transnational rebellion", "transnational regime", "transnational resistance", "transnational secession", "transnational separatism", "transnational siege", "transnational skirmish", "transnational uprising", "transnational war", "transparency", "trauma", "treaty", "tribal", "tribunal", "truth", "tsunami", "twister", "typhoon", "uav", "ultimatum", "underground", "unemployment", "unilateralism", "unprecedented catastrophe", "unprecedented crisis", "unprecedented disaster", "unprecedented emergency", "unprecedented hazard", "unprecedented threat", "unity", "unrest", "unofficial annexation", "unofficial assault", "unofficial bombardment", "unofficial conflict", "unofficial crisis", "unstable", "uprising", "urban warfare", "valour", "vandalism", "vengeance", "verification", "violation", "violence", "volatility", "volcano", "vulnerability", "war", "war-crime", "water scarcity", "water security", "wealth", "weaponization", "well-being", "wildfire", "wmd", "xenophobia"
 ]
 
-def scrape_website(url, use_browser=False, error_callback=None):
+def _extract_text_from_html(html_content):
+    """Parse HTML and return plain text, stripping scripts and styles."""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    for tag in soup(["script", "style"]):
+        tag.extract()
+    return soup.get_text(separator=' ', strip=True)
+
+
+def scrape_website(url, use_browser=False, error_callback=None, max_retries=MAX_RETRIES):
+    """
+    Fetch the text content of a URL.
+    Automatically retries up to max_retries times with exponential backoff.
+    Rotates User-Agent strings on each retry to avoid bot-detection blocks.
+    """
     if use_browser:
+        # Selenium path — retry once on failure (browser is expensive to spin up)
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
-        import time
-        
-        try:
-            options = Options()
-            options.add_argument("--headless")
-            # We add some generic options to make selenium stealthier 
-            options.add_argument("--disable-gpu")
-            options.add_argument("window-size=1920,1080")
-            
-            driver = webdriver.Chrome(options=options)
-            driver.get(url)
-            
-            # Sleep to wait for JS frameworks to hydrate
-            time.sleep(5)
-            
-            # Scroll bottom to trigger extra loads if any
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-            
-            html_content = driver.page_source
-            driver.quit()
-            
-            soup = BeautifulSoup(html_content, 'html.parser')
-            for script in soup(["script", "style"]):
-                script.extract()
-            text = soup.get_text(separator=' ', strip=True)
-            return text
-            
-        except Exception as e:
-            if error_callback:
-                error_callback(f"Selenium Headless Browser fetch failed: {e}")
-            return None
 
-    # Fallback to standard fast requests if use_browser=False
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=12)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        for script in soup(["script", "style"]):
-            script.extract()
-            
-        text = soup.get_text(separator=' ', strip=True)
-        return text
-    except Exception as e:
-        if error_callback:
-            error_callback(f"Failed to fetch webpage: {e}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"[Browser] Attempt {attempt}/{max_retries}: {url}")
+                options = Options()
+                options.add_argument("--headless")
+                options.add_argument("--disable-gpu")
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+                options.add_argument("window-size=1920,1080")
+
+                driver = webdriver.Chrome(options=options)
+                driver.get(url)
+                time.sleep(5)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(2)
+
+                html_content = driver.page_source
+                driver.quit()
+
+                text = _extract_text_from_html(html_content)
+                if text and len(text) >= MIN_CONTENT_LENGTH:
+                    logger.info(f"[Browser] ✅ Success on attempt {attempt}: {url}")
+                    return text
+
+                logger.warning(f"[Browser] ⚠️ Content too short ({len(text)} chars) on attempt {attempt}: {url}")
+
+            except Exception as e:
+                logger.warning(f"[Browser] ❌ Attempt {attempt} failed: {e}")
+                if error_callback:
+                    error_callback(f"[Attempt {attempt}/{max_retries}] Selenium fetch failed: {e}")
+
+            if attempt < max_retries:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                logger.info(f"[Browser] Retrying in {delay}s...")
+                time.sleep(delay)
+
         return None
+
+    # ── Standard requests path with retry + User-Agent rotation ──────────────
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        ua = USER_AGENTS[(attempt - 1) % len(USER_AGENTS)]
+        headers = {"User-Agent": ua}
+
+        try:
+            logger.info(f"[Requests] Attempt {attempt}/{max_retries}: {url}")
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+
+            text = _extract_text_from_html(response.content)
+
+            if text and len(text) >= MIN_CONTENT_LENGTH:
+                logger.info(f"[Requests] ✅ Success on attempt {attempt}: {url}")
+                return text
+
+            last_error = f"Content too short ({len(text)} chars)"
+            logger.warning(f"[Requests] ⚠️ {last_error} on attempt {attempt}: {url}")
+
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"[Requests] ❌ Attempt {attempt} failed: {e}")
+
+        if attempt < max_retries:
+            delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.info(f"[Requests] Retrying in {delay}s... (next UA: {USER_AGENTS[attempt % len(USER_AGENTS)][:40]})")
+            time.sleep(delay)
+
+    # All retries exhausted
+    if error_callback:
+        error_callback(f"Failed to fetch {url} after {max_retries} attempts. Last error: {last_error}")
+    return None
+
 
 def invoke_ai_agent(scraped_text, user_prompt, streaming_callback=None):
     if not scraped_text:
